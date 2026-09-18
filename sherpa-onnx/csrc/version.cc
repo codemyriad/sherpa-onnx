@@ -19,7 +19,7 @@ const char *GetGitSha1() {
 }
 
 const char *GetVersionStr() {
-  static const char *version = "1.13.7";
+  static const char *version = "1.13.7+cassini-parakeet-v3-reference-v1";
   return version;
 }
 
