@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -3142,6 +3143,30 @@ struct SherpaOnnxOfflineSpeakerDiarizationResult {
   sherpa_onnx::OfflineSpeakerDiarizationResult impl;
 };
 
+// Cassini: the C struct of this release has no sortformer field, so a
+// Sortformer model (e.g., Nemotron-3-Diarization) can be given as the
+// pyannote model. onnx.save() writes the metadata after the graph, so the
+// model type is within the last few KB of the file.
+static bool IsSortformerModel(const std::string &filename) {
+  std::ifstream is(filename, std::ios::binary | std::ios::ate);
+  if (!is) {
+    return false;
+  }
+
+  constexpr std::streamoff kTailSize = 64 * 1024;
+  std::streamoff size = is.tellg();
+  std::streamoff n = std::min(size, kTailSize);
+  if (n <= 0) {
+    return false;
+  }
+
+  std::string tail(static_cast<size_t>(n), '\0');
+  is.seekg(size - n);
+  is.read(&tail[0], n);
+
+  return tail.find("nemotron3_diarization") != std::string::npos;
+}
+
 static sherpa_onnx::OfflineSpeakerDiarizationConfig
 GetOfflineSpeakerDiarizationConfig(
     const SherpaOnnxOfflineSpeakerDiarizationConfig *config) {
@@ -3149,6 +3174,11 @@ GetOfflineSpeakerDiarizationConfig(
 
   sd_config.segmentation.pyannote.model =
       SHERPA_ONNX_OR(config->segmentation.pyannote.model, "");
+  if (IsSortformerModel(sd_config.segmentation.pyannote.model)) {
+    sd_config.segmentation.sortformer.model =
+        sd_config.segmentation.pyannote.model;
+    sd_config.segmentation.pyannote.model.clear();
+  }
   sd_config.segmentation.pyannote.window_shift_ratio =
       config->segmentation.pyannote.window_shift_ratio <= 0
           ? 0.1f
