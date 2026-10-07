@@ -36,3 +36,24 @@ transcription checks, rebuild both CPU architectures, publish a new immutable
 Go module tag, and update Cassini's module/source pins together. CUDA compilation
 and GPU inference need separate validation; CPU success does not establish GPU
 support. Do not rewrite published tags or modify the user's Go module cache.
+
+## Nemotron-3-Diarization
+
+The branch `feat/nemotron3-diarization-cassini` adds end-to-end speaker
+diarization with NVIDIA Nemotron-3-Diarization (k2-fsa/sherpa-onnx#4006):
+
+- The C++ runtime is a cherry-pick of the upstream contribution
+  (`feat/nemotron3-diarization`). Upstream adds a `segmentation.sortformer`
+  config, which changes the C struct layout.
+- Cassini keeps the stock sherpa-onnx-go v1.13.7 wrapper. The C API accepts a
+  Sortformer model in `Segmentation.Pyannote.Model` and detects it from the
+  ONNX metadata. No embedding model or clustering config is needed. Pyannote
+  models are unaffected.
+- The runtime version gains `.nemotron-diarization-v1`. The existing
+  `+cassini-parakeet-v3-reference-v1` marker is unchanged, so Contains checks
+  keep working.
+
+Validated on Linux amd64 only: parity with the transformers reference (max
+probability difference 1.3e-5 on 227 s), the cache unit tests, and Go through
+the stock wrapper with a locally built library. No binaries, Go module tag or
+Cassini pin have been published for it.
