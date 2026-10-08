@@ -57,3 +57,16 @@ Validated on Linux amd64 only: parity with the transformers reference (max
 probability difference 1.3e-5 on 227 s), the cache unit tests, and Go through
 the stock wrapper with a locally built library. No binaries, Go module tag or
 Cassini pin have been published for it.
+
+## Nemotron interface version 2
+
+The reviewed Nemotron implementation adds the scalar `num_frames` model input
+and masks padded frames before the output convolution. It requires ONNX
+metadata version 2 and reports `.nemotron-diarization-v2`. The stock v1.13.7
+Go/C API shim remains unchanged: set `Segmentation.Pyannote.Model` to the
+Nemotron model. The Parakeet frontend remains unchanged.
+
+Backported from codemyriad/sherpa-onnx commit
+`1a07f97662c8765784472c10d0c23ba24378f4cc`, including strict metadata parsing,
+finite silence embeddings, overflow-safe cache updates and boundary handling.
+Version-1 Nemotron exports require the older Cassini runtime.

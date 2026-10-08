@@ -20,7 +20,7 @@ const char *GetGitSha1() {
 
 const char *GetVersionStr() {
   static const char *version =
-      "1.13.7+cassini-parakeet-v3-reference-v1.nemotron-diarization-v1";
+      "1.13.7+cassini-parakeet-v3-reference-v1.nemotron-diarization-v2";
   return version;
 }
 

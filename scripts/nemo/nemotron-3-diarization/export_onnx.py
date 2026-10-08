@@ -11,16 +11,18 @@ the caller (see ./test_onnx.py and
 sherpa-onnx/csrc/offline-speaker-diarization-sortformer-impl.h).
 
 Inputs:
-  - features: (N, T, 128), log-mel frames, T must be a multiple of 8
-  - cached_embeds: (N, C, 512), speaker cache + FIFO embeddings; C may be 0
+  - features: (1, T, 128), log-mel frames, T must be a multiple of 8
+  - cached_embeds: (1, C, 512), speaker cache + FIFO embeddings; C may be 0
+  - num_frames: scalar int64, valid mel frames in features (before padding)
 
 Outputs:
-  - probs: (N, (C + T/8) * 8, 8), sigmoid speaker activity, one row per 10 ms
-  - chunk_embeds: (N, T/8, 512), embeddings of the chunk frames, to be pushed
+  - probs: (1, (C + T/8) * 8, 8), sigmoid speaker activity, one row per 10 ms
+  - chunk_embeds: (1, T/8, 512), embeddings of the chunk frames, to be pushed
     to the FIFO queue
 """
 
 import argparse
+from pathlib import Path
 from typing import Dict
 
 import onnx
@@ -36,6 +38,12 @@ def get_args():
         type=str,
         default="nvidia/Nemotron-3-Diarization",
         help="Hugging Face model ID or local directory",
+    )
+    parser.add_argument(
+        "--revision",
+        type=str,
+        default="f667ed73aee57d40cc39428eb768b4fd87a0a29e",
+        help="Hugging Face model revision (ignored for a local directory)",
     )
     parser.add_argument("--opset", type=int, default=17)
     return parser.parse_args()
@@ -64,29 +72,41 @@ class OnnxModel(torch.nn.Module):
         self.projection = model.model.audio_tower.embedder.projection
         self.subsampling_factor = model.config.audio_config.subsampling_factor
 
-    def forward(self, features: torch.Tensor, cached_embeds: torch.Tensor):
+    def forward(
+        self,
+        features: torch.Tensor,
+        cached_embeds: torch.Tensor,
+        num_frames: torch.Tensor,
+    ):
         """
         Args:
-          features: (N, T, num_mel_bins), T % subsampling_factor == 0
-          cached_embeds: (N, C, hidden_size)
+          features: (1, T, num_mel_bins), T % subsampling_factor == 0
+          cached_embeds: (1, C, hidden_size)
+          num_frames: scalar, number of valid mel frames in features
         Returns:
-          probs: (N, (C + T / subsampling_factor) * subsampling_factor,
+          probs: (1, (C + T / subsampling_factor) * subsampling_factor,
                   num_speakers)
-          chunk_embeds: (N, T / subsampling_factor, hidden_size)
+          chunk_embeds: (1, T / subsampling_factor, hidden_size)
         """
         n = features.shape[0]
         # Feature stacking. The caller zero-pads the last group, like
         # Nemotron3DiarizationFeatureStacking does.
-        stacked = features.reshape(
-            n, -1, features.shape[2] * self.subsampling_factor
-        )
+        stacked = features.reshape(n, -1, features.shape[2] * self.subsampling_factor)
         chunk_embeds = self.projection(stacked)
 
         x = torch.cat([cached_embeds, chunk_embeds], dim=1)
 
         # Positions restart at every step
         position_ids = torch.arange(x.shape[1], device=x.device).unsqueeze(0)
-        hidden = self.model(inputs_embeds=x, position_ids=position_ids)
+        valid_embeds = (
+            num_frames + self.subsampling_factor - 1
+        ) // self.subsampling_factor
+        attention_mask = position_ids < cached_embeds.shape[1] + valid_embeds
+        hidden = self.model(
+            inputs_embeds=x,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+        )
         logits = self.classifier(hidden.last_hidden_state)
         return logits.sigmoid(), chunk_embeds
 
@@ -101,10 +121,13 @@ def main():
     print(vars(args))
 
     model = AutoModelForAudioFrameClassification.from_pretrained(
-        args.model_id, attn_implementation="eager", dtype=torch.float32
+        args.model_id,
+        revision=args.revision,
+        attn_implementation="eager",
+        dtype=torch.float32,
     )
     model.eval()
-    processor = AutoProcessor.from_pretrained(args.model_id)
+    processor = AutoProcessor.from_pretrained(args.model_id, revision=args.revision)
     fe = processor.feature_extractor
 
     config = model.config
@@ -121,19 +144,20 @@ def main():
 
     features = torch.randn(1, 13 * subsampling_factor, num_mel_bins)
     cached_embeds = torch.randn(1, 7, hidden_size)
+    num_frames = torch.tensor(features.shape[1], dtype=torch.int64)
 
     filename = "model.onnx"
     torch.onnx.export(
         onnx_model,
-        (features, cached_embeds),
+        (features, cached_embeds, num_frames),
         filename,
-        input_names=["features", "cached_embeds"],
+        input_names=["features", "cached_embeds", "num_frames"],
         output_names=["probs", "chunk_embeds"],
         dynamic_axes={
-            "features": {0: "N", 1: "T"},
-            "cached_embeds": {0: "N", 1: "C"},
-            "probs": {0: "N", 1: "T_out"},
-            "chunk_embeds": {0: "N", 1: "T_chunk"},
+            "features": {1: "T"},
+            "cached_embeds": {1: "C"},
+            "probs": {1: "T_out"},
+            "chunk_embeds": {1: "T_chunk"},
         },
         opset_version=args.opset,
         dynamo=False,
@@ -141,10 +165,15 @@ def main():
 
     meta_data = {
         "model_type": "nemotron3_diarization",
-        "version": 1,
+        "version": 2,
         "model_author": "NVIDIA",
         "url": "https://huggingface.co/nvidia/Nemotron-3-Diarization",
-        "license": "https://huggingface.co/nvidia/Nemotron-3-Diarization",
+        "license": "OpenMDW-1.1",
+        "model_revision": (
+            "local"
+            if Path(args.model_id).is_dir()
+            else getattr(config, "_commit_hash", None) or args.revision
+        ),
         "comment": "Streaming Sortformer with Arrival-Order Speaker Cache",
         # frontend
         "sample_rate": fe.sampling_rate,
