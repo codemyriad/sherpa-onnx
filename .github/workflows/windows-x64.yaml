@@ -122,14 +122,14 @@ jobs:
           cmake --version
 
           cmake --build . --config ${{ matrix.build_type }} -- -m:2
-          cmake --build . --config ${{ matrix.build_type }} --target install -- -m:2
+          cmake --install . --config ${{ matrix.build_type }}
 
           ls -lh ./bin/${{ matrix.build_type }}/sherpa-onnx.exe
 
       - name: Show exe
         shell: bash
         run: |
-          ls -lh $PWD/build/bin/${{ matrix.build_type }}
+          ls -lh "$PWD/build/bin/${{ matrix.build_type }}"
 
       - name: Dump CRT dependencies
         shell: cmd
@@ -141,7 +141,7 @@ jobs:
           name: windows-x64-${{ matrix.shared_lib }}-${{ matrix.with_tts }}-static-crt-${{ matrix.use_static_crt }}-${{ matrix.build_type }}
           path: build/install/*
 
-      - name: Copy files
+      - name: Package files
         shell: bash
         run: |
           SHERPA_ONNX_VERSION=v$(grep "SHERPA_ONNX_VERSION" ./CMakeLists.txt  | cut -d " " -f 2  | cut -d '"' -f 2)
@@ -168,7 +168,7 @@ jobs:
             dst=sherpa-onnx-${SHERPA_ONNX_VERSION}-win-x64-$suffix-no-tts
           fi
 
-          mkdir $dst
+          mkdir "$dst"
 
           if [[ "${{ matrix.build_type }}" == "Debug" || "${{ matrix.build_type }}" == "RelWithDebInfo" ]]; then
             echo "Copy matching PDB files..."
@@ -176,53 +176,54 @@ jobs:
             build_bin_dir=build/bin/${{ matrix.build_type }}
             install_bin_dir=build/install/bin
 
-            for exe in ${install_bin_dir}/*.exe; do
+            for exe in "${install_bin_dir}"/*.exe; do
               base=$(basename "$exe" .exe)
               pdb=${build_bin_dir}/${base}.pdb
 
               if [[ -f "$pdb" ]]; then
                 echo "Copying $pdb"
-                cp "$pdb" ${install_bin_dir}/
+                cp "$pdb" "${install_bin_dir}/"
               else
                 echo "No PDB found for $base"
               fi
             done
           fi
 
-          cp -a build/install/bin $dst/
-          cp -a build/install/lib $dst/
-          cp -a build/install/include $dst/
+          # Move the install tree on the same drive instead of copying large
+          # static libraries. PDBs have been retained above; build/bin remains for model tests.
+          df -h .
+          du -sh build build/install
+          mv build/install/bin build/install/lib build/install/include "$dst/"
+          df -h .
 
-          if [[ $shared_lib == "ON" && -f build/install/lib/onnxruntime.lib ]]; then
-            cp -v build/install/lib/onnxruntime.lib $dst/lib/
-          fi
+          rm -rf "$dst/lib/pkgconfig"
+          rm -f "$dst/lib/cargs.dll" "$dst/lib/cargs.lib" "$dst/lib/cargs.h"
+          rm -f "$dst/include/cargs.h"
 
-          rm -rf $dst/lib/pkgconfig
-          rm -f $dst/lib/cargs.dll $dst/lib/cargs.lib $dst/lib/cargs.h
-          rm -f $dst/include/cargs.h
-
-          ls -lh $dst/bin/
+          ls -lh "$dst/bin/"
           echo "---"
-          ls -lh $dst/lib/
+          ls -lh "$dst/lib/"
 
-          tar cjvf ${dst}.tar.bz2 $dst
+          tar cjvf "${dst}.tar.bz2" "$dst"
 
           lib_dst=${dst}-lib
-          mkdir -p ${lib_dst}/lib
+          mkdir -p "$lib_dst"
+          # The complete archive already contains lib/. Reuse that directory
+          # for the library-only archive without another copy of the libraries.
+          mv "$dst/lib" "$lib_dst/lib"
+          find "$lib_dst/lib" -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+          rm -f "$lib_dst/lib/cargs.h"
           if [[ $shared_lib == "ON" ]]; then
-            cp -av build/install/lib/*.dll ${lib_dst}/lib/
-            cp -av build/install/lib/*.lib ${lib_dst}/lib/
-            rm -f ${lib_dst}/lib/cargs.dll ${lib_dst}/lib/cargs.lib
+            find "$lib_dst/lib" -maxdepth 1 -type f ! -name '*.dll' ! -name '*.lib' -delete
           else
-            cp -av build/install/lib/*.lib ${lib_dst}/lib/
-            rm -f ${lib_dst}/lib/cargs.lib
+            find "$lib_dst/lib" -maxdepth 1 -type f ! -name '*.lib' -delete
           fi
-          ls -lh ${lib_dst}/lib/
-          tar cjvf ${lib_dst}.tar.bz2 ${lib_dst}
+          ls -lh "$lib_dst/lib/"
+          tar cjvf "${lib_dst}.tar.bz2" "$lib_dst"
+          rm -rf "$dst" "$lib_dst"
+          df -h .
 
-          ls -lh $dst/
-
-          ls -lh *.tar.bz2
+          ls -lh ./*.tar.bz2
 
       # https://huggingface.co/docs/hub/spaces-github-actions
       - name: Publish to huggingface
