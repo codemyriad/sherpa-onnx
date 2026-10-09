@@ -8,18 +8,45 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
     paths:
       - '.github/workflows/windows-x64.yaml'
-      - '.github/scripts/test-online-transducer.sh'
-      - '.github/scripts/test-online-paraformer.sh'
+      - '.github/scripts/test-offline-whisper.sh'
       - '.github/scripts/test-offline-cohere-transcribe.sh'
-      # - '.github/scripts/test-offline-diacritization.sh'
-      - '.github/scripts/test-offline-transducer.sh'
-      - '.github/scripts/test-offline-ctc.sh'
+      - '.github/scripts/test-offline-moonshine.sh'
+      - '.github/scripts/test-cxx-api.sh'
+      - '.github/scripts/test-speaker-diarization.sh'
+      - '.github/scripts/test-online-punctuation.sh'
+      - '.github/scripts/test-offline-punctuation.sh'
+      - '.github/scripts/test-c-api.sh'
+      - '.github/scripts/test-audio-tagging.sh'
+      - '.github/scripts/test-spoken-language-identification.sh'
       - '.github/scripts/test-online-ctc.sh'
       - '.github/scripts/test-offline-tts.sh'
+      - '.github/scripts/test-online-paraformer.sh'
+      - '.github/scripts/test-offline-ctc.sh'
+      - '.github/scripts/test-offline-transducer.sh'
+      - '.github/scripts/test-online-transducer.sh'
+      - '.github/scripts/common.sh'
       - 'cmake/**'
       - 'sherpa-onnx/csrc/*'
 
   workflow_dispatch:
+    inputs:
+      tests:
+        description: Model test coverage (all 32 build configurations are always built)
+        type: choice
+        default: smoke
+        options:
+          - smoke
+          - full
+      max_parallel:
+        description: Concurrent jobs (auto uses repository policy)
+        type: choice
+        default: auto
+        options:
+          - auto
+          - '4'
+          - '8'
+          - '16'
+          - '32'
 
 concurrency:
   group: windows-x64-${{ github.ref }}
@@ -29,8 +56,12 @@ jobs:
   windows_x64:
     name: shared-${{ matrix.shared_lib }} tts-${{ matrix.with_tts }} static CRT ${{ matrix.use_static_crt }} ${{ matrix.build_type }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
+      # Preserve upstream throughput; forks default to leaving org runners free.
+      # A dispatch input overrides the repository variable, then this default.
+      max-parallel: ${{ fromJSON((inputs.max_parallel != 'auto' && inputs.max_parallel) || vars.WINDOWS_X64_MAX_PARALLEL || ((github.repository_owner == 'k2-fsa' || github.repository_owner == 'csukuangfj') && '32' || '4')) }}
       matrix:
         os: [windows-2022]
         build_type: [Release, Debug, MinSizeRel, RelWithDebInfo]
@@ -141,6 +172,76 @@ jobs:
           name: windows-x64-${{ matrix.shared_lib }}-${{ matrix.with_tts }}-static-crt-${{ matrix.use_static_crt }}-${{ matrix.build_type }}
           path: build/install/*
 
+      - name: Smoke test C/C++ API versions
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        shell: bash
+        run: |
+          export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
+          build/bin/${{ matrix.build_type }}/version-c-api.exe
+          build/bin/${{ matrix.build_type }}/version-cxx-api.exe
+
+      # API examples are not installed by CMake; retain the build's runnable
+      # binaries separately from the install artifact used by downstream jobs.
+      - name: Upload representative test runtime
+        if: >-
+          !startsWith(github.ref, 'refs/tags/') &&
+          (github.event_name == 'push' || inputs.tests == 'full') &&
+          matrix.build_type == 'Release' && matrix.with_tts == 'ON' &&
+          matrix.use_static_crt == 'ON'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-test-runtime-${{ matrix.shared_lib }}
+          path: |
+            build/bin/Release/*
+            !build/bin/Release/*.pdb
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Retain symbols and remove build intermediates
+        shell: bash
+        run: |
+          df -h .
+          du -sh build build/install
+          if [[ "${{ matrix.build_type }}" == "Debug" || "${{ matrix.build_type }}" == "RelWithDebInfo" ]]; then
+            echo "Copy matching PDB files..."
+
+            build_bin_dir=build/bin/${{ matrix.build_type }}
+            install_bin_dir=build/install/bin
+
+            for exe in "${install_bin_dir}"/*.exe; do
+              base=$(basename "$exe" .exe)
+              pdb=${build_bin_dir}/${base}.pdb
+
+              if [[ -f "$pdb" ]]; then
+                echo "Copying $pdb"
+                cp "$pdb" "${install_bin_dir}/"
+              else
+                echo "No PDB found for $base"
+              fi
+            done
+          fi
+
+          # Preserve only the installed package before downloading smoke models.
+          find build -mindepth 1 -maxdepth 1 ! -name install -exec rm -rf {} +
+          df -h .
+
+      - name: Cache smoke-test Whisper model
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/cache@v4
+        with:
+          path: .ci-models/whisper
+          key: windows-x64-whisper-tiny.en-v1
+
+      - name: Smoke test installed recognizer
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        shell: bash
+        env:
+          WHISPER_MODEL_CACHE_DIR: ${{ github.workspace }}/.ci-models/whisper
+        run: |
+          export PATH=$PWD/build/install/bin:$PWD/build/install/lib:$PATH
+          export EXE=$PWD/build/install/bin/sherpa-onnx-offline.exe
+          .github/scripts/test-offline-whisper.sh tiny.en
+
       - name: Package files
         shell: bash
         run: |
@@ -168,32 +269,13 @@ jobs:
             dst=sherpa-onnx-${SHERPA_ONNX_VERSION}-win-x64-$suffix-no-tts
           fi
 
-          mkdir "$dst"
-
-          if [[ "${{ matrix.build_type }}" == "Debug" || "${{ matrix.build_type }}" == "RelWithDebInfo" ]]; then
-            echo "Copy matching PDB files..."
-
-            build_bin_dir=build/bin/${{ matrix.build_type }}
-            install_bin_dir=build/install/bin
-
-            for exe in "${install_bin_dir}"/*.exe; do
-              base=$(basename "$exe" .exe)
-              pdb=${build_bin_dir}/${base}.pdb
-
-              if [[ -f "$pdb" ]]; then
-                echo "Copying $pdb"
-                cp "$pdb" "${install_bin_dir}/"
-              else
-                echo "No PDB found for $base"
-              fi
-            done
-          fi
-
           # Move the install tree on the same drive instead of copying large
-          # static libraries. PDBs have been retained above; build/bin remains for model tests.
+          # static libraries. PDBs and test runtimes have been retained above.
           df -h .
           du -sh build build/install
+          mkdir "$dst"
           mv build/install/bin build/install/lib build/install/include "$dst/"
+          rm -rf build
           df -h .
 
           rm -rf "$dst/lib/pkgconfig"
@@ -278,29 +360,55 @@ jobs:
           overwrite: true
           file: sherpa-onnx-*-win-x64*.tar.bz2
 
+  model_tests:
+    name: Model tests shared-${{ matrix.shared_lib }} (${{ matrix.suite }})
+    needs: windows_x64
+    # Still test available representative runtimes if an unrelated build fails.
+    if: >-
+      !cancelled() && !startsWith(github.ref, 'refs/tags/') &&
+      (github.event_name == 'push' || inputs.tests == 'full')
+    runs-on: windows-2022
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      # Preserve upstream throughput; forks default to leaving org runners free.
+      # A dispatch input overrides the repository variable, then this default.
+      max-parallel: ${{ fromJSON((inputs.max_parallel != 'auto' && inputs.max_parallel) || vars.WINDOWS_X64_MAX_PARALLEL || ((github.repository_owner == 'k2-fsa' || github.repository_owner == 'csukuangfj') && '32' || '4')) }}
+      matrix:
+        shared_lib: [ON, OFF]
+        suite: [api, offline-asr, online-asr, speech]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Release TTS static-CRT runtime
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-x64-test-runtime-${{ matrix.shared_lib }}
+          path: test-runtime
+
       - name: Test offline Cohere Transcribe for windows x64
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: matrix.suite == 'offline-asr'
         shell: bash
         run: |
-          export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
+          export PATH=$PWD/test-runtime:$PATH
           export EXE=sherpa-onnx-offline.exe
 
           .github/scripts/test-offline-cohere-transcribe.sh
 
       - name: Test offline Moonshine for windows x64
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: matrix.suite == 'offline-asr'
         shell: bash
         run: |
-          export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
+          export PATH=$PWD/test-runtime:$PATH
           export EXE=sherpa-onnx-offline.exe
 
           .github/scripts/test-offline-moonshine.sh
 
       - name: Test C++ API
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: matrix.suite == 'api'
         shell: bash
         run: |
-          export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
+          export PATH=$PWD/test-runtime:$PATH
           export CXX_STREAMING_ZIPFORMER_EXE=streaming-zipformer-cxx-api.exe
           export CXX_WHISPER_EXE=whisper-cxx-api.exe
           export CXX_SENSE_VOICE_EXE=sense-voice-cxx-api.exe
@@ -308,46 +416,37 @@ jobs:
           .github/scripts/test-cxx-api.sh
 
       - name: Test offline speaker diarization
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: matrix.suite == 'speech'
         shell: bash
         run: |
-          export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
+          export PATH=$PWD/test-runtime:$PATH
           export EXE=sherpa-onnx-offline-speaker-diarization.exe
 
           .github/scripts/test-speaker-diarization.sh
 
       - name: Test online punctuation
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: matrix.suite == 'speech'
         shell: bash
         run: |
-          export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
+          export PATH=$PWD/test-runtime:$PATH
           export EXE=sherpa-onnx-online-punctuation.exe
 
           .github/scripts/test-online-punctuation.sh
 
       - name: Test offline punctuation
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: matrix.suite == 'speech'
         shell: bash
         run: |
-          export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
+          export PATH=$PWD/test-runtime:$PATH
           export EXE=sherpa-onnx-offline-punctuation.exe
 
           .github/scripts/test-offline-punctuation.sh
 
-      # - name: Test offline diacritization
-      #   if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-      #   shell: bash
-      #   run: |
-      #     export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
-      #     export EXE=sherpa-onnx-offline-diacritization.exe
-      #
-      #     .github/scripts/test-offline-diacritization.sh
-
       - name: Test C API
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: matrix.suite == 'api'
         shell: bash
         run: |
-          export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
+          export PATH=$PWD/test-runtime:$PATH
           export SLID_EXE=spoken-language-identification-c-api.exe
           export SID_EXE=speaker-identification-c-api.exe
           export AT_EXE=audio-tagging-c-api.exe
@@ -357,91 +456,91 @@ jobs:
           .github/scripts/test-c-api.sh
 
       - name: Test Audio tagging
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: matrix.suite == 'api'
         shell: bash
         run: |
-          export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
+          export PATH=$PWD/test-runtime:$PATH
           export EXE=sherpa-onnx-offline-audio-tagging.exe
 
           .github/scripts/test-audio-tagging.sh
 
       - name: Test spoken language identification (C++ API)
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: matrix.suite == 'api'
         shell: bash
         run: |
-          export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
+          export PATH=$PWD/test-runtime:$PATH
           export EXE=sherpa-onnx-offline-language-identification.exe
 
           .github/scripts/test-spoken-language-identification.sh
 
       - name: Test online CTC
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: matrix.suite == 'online-asr'
         shell: bash
         run: |
-          export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
+          export PATH=$PWD/test-runtime:$PATH
           export EXE=sherpa-onnx.exe
 
           .github/scripts/test-online-ctc.sh
 
       - name: Test offline TTS
-        if: matrix.with_tts == 'ON' && !startsWith(github.ref, 'refs/tags/')
+        if: matrix.suite == 'speech'
         shell: bash
         run: |
-          export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
+          export PATH=$PWD/test-runtime:$PATH
           export EXE=sherpa-onnx-offline-tts.exe
 
           .github/scripts/test-offline-tts.sh
 
       - name: Test online paraformer for windows x64
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: matrix.suite == 'online-asr'
         shell: bash
         run: |
-          export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
+          export PATH=$PWD/test-runtime:$PATH
           export EXE=sherpa-onnx.exe
 
           .github/scripts/test-online-paraformer.sh
 
       - name: Test offline Whisper for windows x64
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: matrix.suite == 'offline-asr'
         shell: bash
         run: |
-          export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
+          export PATH=$PWD/test-runtime:$PATH
           export EXE=sherpa-onnx-offline.exe
 
-          .github/scripts/test-offline-whisper.sh
+          .github/scripts/test-offline-whisper.sh tiny.en tiny
 
       - name: Test offline CTC for windows x64
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: matrix.suite == 'offline-asr'
         shell: bash
         run: |
-          export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
+          export PATH=$PWD/test-runtime:$PATH
           export EXE=sherpa-onnx-offline.exe
 
           .github/scripts/test-offline-ctc.sh
 
       - name: Test offline transducer for Windows x64
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: matrix.suite == 'offline-asr'
         shell: bash
         run: |
-          export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
+          export PATH=$PWD/test-runtime:$PATH
           export EXE=sherpa-onnx-offline.exe
 
           .github/scripts/test-offline-transducer.sh
 
       - name: Test online transducer for Windows x64
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: matrix.suite == 'online-asr'
         shell: bash
         run: |
-          export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
+          export PATH=$PWD/test-runtime:$PATH
           export EXE=sherpa-onnx.exe
 
           .github/scripts/test-online-transducer.sh
 
       - name: Test online transducer (C API)
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: matrix.suite == 'online-asr'
         shell: bash
         run: |
-          export PATH=$PWD/build/bin/${{ matrix.build_type }}:$PATH
+          export PATH=$PWD/test-runtime:$PATH
           export EXE=decode-file-c-api.exe
 
           .github/scripts/test-online-transducer.sh

@@ -14,7 +14,7 @@ export GIT_CLONE_PROTECTION_ACTIVE=false
 echo "EXE is $EXE"
 echo "PATH: $PATH"
 
-which $EXE
+which "$EXE"
 
 names=(
 tiny.en
@@ -29,19 +29,51 @@ distil-medium.en
 distil-small.en
 )
 
-for name in ${names[@]}; do
+# Callers may choose a bounded CI subset; other workflows retain the full list.
+if (( $# > 0 )); then
+  for name in "$@"; do
+    case "$name" in
+      tiny.en|base.en|small.en|medium.en|tiny|base|small|medium|distil-medium.en|distil-small.en) ;;
+      *) echo "Unsupported Whisper model: $name" >&2; exit 1 ;;
+    esac
+  done
+  names=("$@")
+fi
+
+# Only opt-in callers retain extracted models for actions/cache. Other callers
+# still delete each model after testing to bound disk usage.
+if [[ -n "${WHISPER_MODEL_CACHE_DIR:-}" ]]; then
+  # Preserve relative executable paths when changing to the model cache.
+  EXE=$(realpath "$(command -v "$EXE")")
+  mkdir -p "$WHISPER_MODEL_CACHE_DIR"
+  cd "$WHISPER_MODEL_CACHE_DIR"
+fi
+
+for name in "${names[@]}"; do
   log "------------------------------------------------------------"
   log "Run $name"
   log "------------------------------------------------------------"
 
   repo_url=https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-$name.tar.bz2
-  download_and_extract $repo_url
   repo=sherpa-onnx-whisper-$name
+  cache_complete=true
+  for file in "${name}-tokens.txt" "${name}-encoder.onnx" \
+    "${name}-decoder.onnx" "${name}-encoder.int8.onnx" \
+    "${name}-decoder.int8.onnx" test_wavs/0.wav test_wavs/1.wav test_wavs/8k.wav; do
+    if [[ ! -s "$repo/$file" ]]; then
+      cache_complete=false
+      break
+    fi
+  done
+  if [[ -z "${WHISPER_MODEL_CACHE_DIR:-}" || "$cache_complete" == false ]]; then
+    rm -rf "$repo"
+    download_and_extract "$repo_url"
+  fi
   log "Start testing ${repo_url}"
 
   log "test fp32 onnx"
 
-  time $EXE \
+  time "$EXE" \
     --tokens=$repo/${name}-tokens.txt \
     --whisper-encoder=$repo/${name}-encoder.onnx \
     --whisper-decoder=$repo/${name}-decoder.onnx \
@@ -53,7 +85,7 @@ for name in ${names[@]}; do
 
   log "test int8 onnx"
 
-  time $EXE \
+  time "$EXE" \
     --tokens=$repo/${name}-tokens.txt \
     --whisper-encoder=$repo/${name}-encoder.int8.onnx \
     --whisper-decoder=$repo/${name}-decoder.int8.onnx \
@@ -63,5 +95,7 @@ for name in ${names[@]}; do
     $repo/test_wavs/1.wav \
     $repo/test_wavs/8k.wav
 
-  rm -rf $repo
+  if [[ -z "${WHISPER_MODEL_CACHE_DIR:-}" ]]; then
+    rm -rf "$repo"
+  fi
 done
