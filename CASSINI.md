@@ -70,3 +70,33 @@ Backported from codemyriad/sherpa-onnx commit
 `1a07f97662c8765784472c10d0c23ba24378f4cc`, including strict metadata parsing,
 finite silence embeddings, overflow-safe cache updates and boundary handling.
 Version-1 Nemotron exports require the older Cassini runtime.
+
+## Parakeet Ultra selection
+
+The reference frontend is also selected for Moondream Parakeet Ultra exports
+whose encoder `url` is one of the four known identities: the plain
+`https://huggingface.co/moondream/parakeet-ultra` or that URL followed by
+` (parakeet-tdt architecture)`, ` (parakeet-tdt-0.6b-v3 architecture)` or
+` (retrained nvidia/parakeet-tdt-0.6b-v3)`. The same 128-feature,
+`per_feature`, 16 kHz conditions apply. Any Ultra identity also selects TDT
+decoding; the plain URL previously failed at load because TDT was detected
+only by a `tdt` substring. Other identities keep the previous behavior.
+
+Backported (C++ only) from codemyriad/sherpa-onnx commit
+`d9cee6b90ea24e64dabde83728fa9a921850d3a7` (k2-fsa/sherpa-onnx#4024). The
+frontend math is unchanged. The runtime version gains `.parakeet-ultra-v1`;
+the `+cassini-parakeet-v3-reference-v1` and `.nemotron-diarization-v2`
+markers are unchanged, so Contains checks keep working.
+
+Validated on Linux amd64 CPU: all native tests (23, including
+`offline-stream-parakeet-test`) pass. The PR's `compare-ultra.py` (from
+`d9cee6b9`, with its `parakeet-feature-dump` probe built against this branch)
+passes with the pinned tpmaerk int8 Ultra export and original metadata: ten
+feature comparisons, five speech fixtures with identical corrected/NVIDIA
+tokens, and all eight URL selection cases. The probe ran in `select` mode
+because this branch does not carry the PR's zero-frame batch guard (Cassini
+skips such chunks in Go). With the release CLI, the English sample multiplied
+by `0.001` decodes to the full sentence for Parakeet v3 int8 and for the Ultra
+export with its original, plain-URL and v3-URL metadata; on `.6` the original
+metadata gave an empty transcript and the plain URL exited the process. No GPU
+or ARM64 inference validation is claimed here.
