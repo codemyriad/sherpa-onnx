@@ -19,7 +19,9 @@ const char *GetGitSha1() {
 }
 
 const char *GetVersionStr() {
-  static const char *version = "2.0.1";
+  // Cassini fork markers; see CASSINI.md before changing them.
+  static const char *version =
+      "2.0.1+cassini.parakeet-tdt-joiner-v1.nemotron-diarization-v2";
   return version;
 }
 
