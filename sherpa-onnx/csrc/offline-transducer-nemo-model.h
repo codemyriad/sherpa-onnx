@@ -99,6 +99,26 @@ class OfflineTransducerNeMoModel {
   std::unique_ptr<Impl> impl_;
 };
 
+// Kind of a NeMo transducer joiner, decided from its output size.
+enum class NeMoJoinerKind {
+  kTransducer,  // output_size == vocab_size
+  kTDT,         // vocab_size token logits followed by duration logits
+  kInvalid,     // neither; the model cannot be used
+};
+
+/** Classify a NeMo transducer joiner.
+ *
+ * @param url_says_tdt  true if the encoder's "url" metadata contains "tdt".
+ * @param vocab_size    Vocabulary size including the blank token.
+ * @param output_size   Last dimension of the joiner output.
+ *
+ * A joiner that outputs more logits than the vocabulary has duration logits,
+ * so it is a TDT joiner even when the url does not name the architecture
+ * (e.g., https://huggingface.co/moondream/parakeet-ultra).
+ */
+NeMoJoinerKind ClassifyNeMoJoiner(bool url_says_tdt, int32_t vocab_size,
+                                  int32_t output_size);
+
 }  // namespace sherpa_onnx
 
 #endif  // SHERPA_ONNX_CSRC_OFFLINE_TRANSDUCER_NEMO_MODEL_H_
