@@ -265,20 +265,24 @@ class OfflineTransducerNeMoModel::Impl {
                      .GetTensorTypeAndShapeInfo()
                      .GetShape();
     int32_t output_size = shape.back();
-    if (is_tdt_) {
-      if (vocab_size_ == output_size) {
-        SHERPA_ONNX_LOGE("It is not a TDT model!");
+    switch (ClassifyNeMoJoiner(is_tdt_ != 0, vocab_size_, output_size)) {
+      case NeMoJoinerKind::kTransducer:
+        break;
+      case NeMoJoinerKind::kTDT:
+        is_tdt_ = 1;
+        if (config_.debug) {
+          SHERPA_ONNX_LOGE("TDT model. vocab_size: %d, num_durations: %d",
+                           vocab_size_, output_size - vocab_size_);
+        }
+        break;
+      case NeMoJoinerKind::kInvalid:
+        if (is_tdt_) {
+          SHERPA_ONNX_LOGE("It is not a TDT model!");
+        } else {
+          SHERPA_ONNX_LOGE("vocab_size: %d != output_size: %d", vocab_size_,
+                           output_size);
+        }
         SHERPA_ONNX_EXIT(-1);
-      }
-
-      if (config_.debug) {
-        SHERPA_ONNX_LOGE("TDT model. vocab_size: %d, num_durations: %d",
-                         vocab_size_, output_size - vocab_size_);
-      }
-    } else if (vocab_size_ != output_size) {
-      SHERPA_ONNX_LOGE("vocab_size: %d != output_size: %d", vocab_size_,
-                       output_size);
-      SHERPA_ONNX_EXIT(-1);
     }
   }
 
@@ -377,6 +381,21 @@ std::string OfflineTransducerNeMoModel::FeatureNormalizationMethod() const {
 bool OfflineTransducerNeMoModel::IsGigaAM() const { return impl_->IsGigaAM(); }
 
 bool OfflineTransducerNeMoModel::IsTDT() const { return impl_->IsTDT(); }
+
+NeMoJoinerKind ClassifyNeMoJoiner(bool url_says_tdt, int32_t vocab_size,
+                                  int32_t output_size) {
+  if (output_size == vocab_size) {
+    // A TDT joiner always has at least one duration logit.
+    return url_says_tdt ? NeMoJoinerKind::kInvalid
+                        : NeMoJoinerKind::kTransducer;
+  }
+
+  if (url_says_tdt || output_size > vocab_size) {
+    return NeMoJoinerKind::kTDT;
+  }
+
+  return NeMoJoinerKind::kInvalid;
+}
 
 int32_t OfflineTransducerNeMoModel::FeatureDim() const {
   return impl_->FeatureDim();
