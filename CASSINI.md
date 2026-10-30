@@ -42,6 +42,27 @@ It replaces the `v1.13.7-cassini` branch (tags `v1.13.7-cassini-nemotron-v2`,
    Unit test: `offline-transducer-nemo-joiner-test`. Meant to go upstream on its
    own, after which this commit is dropped.
 3. **Version marker and this file.**
+4. **`cudaGetDeviceProperties` cache, Linux x86_64 CUDA builds only.**
+   `sherpa-onnx/c-api/cassini-cuda-props-cache.cc` is compiled into
+   `libsherpa-onnx-c-api.so` when `SHERPA_ONNX_ENABLE_GPU=ON` (shared, Linux
+   x86_64), and `sherpa-onnx-symbols-c-cuda.lds` exports
+   `cudaGetDeviceProperties` and `cudaGetDeviceProperties_v2` from it. ONNX
+   Runtime 1.28.2 bundles cuDNN-frontend v1.24.0, which calls
+   `cudaGetDeviceProperties` (about 1 ms) every time ORT's CUDA Conv builds a
+   frontend graph, that is once per Conv node per new input shape: 77 calls for
+   every VAD segment of a Parakeet encoder, 22-42% slower GPU builds than ORT
+   1.27.1. Programs link this library, so its definitions come before the
+   `libcudart.so.12` the ORT CUDA provider loads, and the provider's calls land
+   here. After the first successful real call per device (looked up through a
+   `libcudart.so.12` handle) they get a copy. Every call passes through when
+   `cudaRuntimeGetVersion` does not report 12.x (the copied sizes are the CUDA
+   12 ABI) or when `CASSINI_CUDA_PROPS_CACHE=0`. Output is unchanged. CPU,
+   macOS and Windows builds do not contain it, and it adds no version marker:
+   nothing selects on it, and the version string is shared with the CPU
+   libraries and the Go modules. Check a CUDA library with
+   `nm -D --defined-only libsherpa-onnx-c-api.so | grep cudaGetDeviceProperties`.
+   Drop it when the pinned ORT bundles cuDNN-frontend v1.32.0 or later, or
+   sets the Conv graphs' SM version itself.
 
 Not carried any more (compared with `v1.13.7-cassini`):
 
