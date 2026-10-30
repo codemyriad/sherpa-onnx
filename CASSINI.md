@@ -53,8 +53,9 @@ It replaces the `v1.13.7-cassini` branch (tags `v1.13.7-cassini-nemotron-v2`,
    every VAD segment of a Parakeet encoder, 22-42% slower GPU builds than ORT
    1.27.1. Programs link this library, so its definitions come before the
    `libcudart.so.12` the ORT CUDA provider loads, and the provider's calls land
-   here. After the first successful real call per device (looked up through a
-   `libcudart.so.12` handle) they get a copy. Every call passes through when
+   here. After the first successful real call per device (looked up through
+   the already-loaded `libcudart.so.12`; the lookup is retried until that
+   library is loaded) they get a copy. Every call passes through when
    `cudaRuntimeGetVersion` does not report 12.x (the copied sizes are the CUDA
    12 ABI) or when `CASSINI_CUDA_PROPS_CACHE=0`. Output is unchanged. CPU,
    macOS and Windows builds do not contain it, and it adds no version marker:
@@ -63,6 +64,16 @@ It replaces the `v1.13.7-cassini` branch (tags `v1.13.7-cassini-nemotron-v2`,
    `nm -D --defined-only libsherpa-onnx-c-api.so | grep cudaGetDeviceProperties`.
    Drop it when the pinned ORT bundles cuDNN-frontend v1.32.0 or later, or
    sets the Conv graphs' SM version itself.
+   **CUDA 12 only.** The exports carry no symbol version, and the dynamic
+   linker lets an unversioned definition satisfy a versioned reference, so a
+   caller built for another CUDA major (`...@libcudart.so.13`) binds here too.
+   While `libcudart.so.12` is not loaded such calls are forwarded, uncached,
+   to a loaded `libcudart.so.13` or later; a process that loads both majors
+   would hand the newer caller the CUDA 12 layout. So the patch must be
+   dropped before the pinned ORT moves to a CUDA 13 build: the C API's CMake
+   refuses a GPU ORT download whose name lacks `cuda12` while the patch is
+   compiled in, and gocassini's `build.sh` checks that the CUDA provider
+   imports `libcudart.so.12`.
 
 Not carried any more (compared with `v1.13.7-cassini`):
 

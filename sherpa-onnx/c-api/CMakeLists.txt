@@ -20,6 +20,13 @@ if(SHERPA_ONNX_ENABLE_GPU AND BUILD_SHARED_LIBS
    AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
    AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
   set(SHERPA_ONNX_CASSINI_CUDA_PROPS_CACHE ON)
+  # The copied struct sizes are the CUDA 12 ABI, and its unversioned exports
+  # would also take a CUDA 13 provider's calls. Remove the cache before the
+  # pinned ORT moves to a CUDA 13 build.
+  if(DEFINED onnxruntime_URL AND NOT onnxruntime_URL MATCHES "cuda12")
+    message(FATAL_ERROR "cassini-cuda-props-cache.cc supports ORT's CUDA 12 "
+      "provider only; given ${onnxruntime_URL}. See CASSINI.md, patch 4.")
+  endif()
   target_sources(sherpa-onnx-c-api PRIVATE cassini-cuda-props-cache.cc)
   target_link_libraries(sherpa-onnx-c-api ${CMAKE_DL_LIBS})
 endif()

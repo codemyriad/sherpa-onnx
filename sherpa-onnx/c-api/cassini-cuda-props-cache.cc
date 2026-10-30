@@ -23,7 +23,21 @@
 // nothing binds here and the cache simply never runs. The real functions are
 // looked up through the libcudart.so.12 handle, whose lookup scope is
 // libcudart and its own dependencies, never RTLD_DEFAULT or RTLD_NEXT, which
-// could find these very definitions again.
+// could find these very definitions again. That handle is only ever taken on
+// an already-loaded libcudart.so.12 (RTLD_NOLOAD): a CUDA 12 caller has it as
+// a dependency, so it is loaded before the caller's first call. Until it is
+// loaded, the lookup is retried on every call.
+//
+// Other CUDA majors. This library has no symbol versions, and the dynamic
+// linker lets an unversioned definition satisfy a versioned reference, so a
+// cudaGetDeviceProperties*@libcudart.so.13 reference binds here too. While
+// libcudart.so.12 is not loaded, such calls are forwarded uncached to an
+// already-loaded libcudart.so.13 or later, so a process with only a newer
+// runtime works as before. A process that loads both libcudart.so.12 and a
+// newer runtime would hand the newer caller the CUDA 12 layout: that is not
+// supported. Cassini ships this file only next to ORT's CUDA 12 provider; the
+// CMake check in sherpa-onnx/c-api/CMakeLists.txt refuses a non-CUDA-12 ORT
+// download, and the file must be removed before the ORT pin moves to CUDA 13.
 //
 // ABI. The build has no CUDA headers, so the struct is opaque here and its
 // size is a constant of the CUDA 12 ABI: _v2 takes the 1032-byte CUDA 12
@@ -37,7 +51,8 @@
 //
 // Remove when the pinned ORT bundles cuDNN-frontend >= v1.32.0 (it reads the
 // SM version with cudaDeviceGetAttribute) or ORT calls Graph::set_sm_version()
-// on its Conv graphs itself.
+// on its Conv graphs itself, and in any case before the pinned ORT is a CUDA 13
+// build.
 
 #include <dlfcn.h>
 
@@ -53,9 +68,9 @@ using GetPropsFn = int (*)(void *prop, int device);
 using RuntimeVersionFn = int (*)(int *version);
 
 constexpr int kCudaSuccess = 0;
-// cudaErrorSharedObjectSymbolNotFound. Returned only if libcudart.so.12 or
-// the symbol cannot be found, which cannot happen for a caller that was
-// itself linked against libcudart.so.12.
+// cudaErrorSharedObjectSymbolNotFound: no loaded CUDA runtime defines the
+// function. A caller linked against a CUDA runtime never sees it, since its
+// runtime is loaded before it can call.
 constexpr int kCudaErrorSymbolNotFound = 302;
 constexpr int kMaxDevices = 64;
 constexpr std::size_t kPropSizeV2 = 1032;     // CUDA 12 cudaDeviceProp
@@ -76,28 +91,53 @@ struct Entry {
 
 Entry g_v2{"cudaGetDeviceProperties_v2", kPropSizeV2, nullptr, {}};
 Entry g_legacy{"cudaGetDeviceProperties", kPropSizeLegacy, nullptr, {}};
-bool g_cache = false;  // the cache may engage; set once, under g_init
-std::once_flag g_init;
+bool g_cache = false;  // the cache may engage; written once, before g_resolved
+std::atomic<bool> g_resolved{false};
+std::mutex g_resolve_mutex;
 
-void Init() {
+// Resolves the real functions from an already-loaded libcudart.so.12. Returns
+// false, and is tried again on the next call, while that library is not
+// loaded.
+bool Resolve() {
+  if (g_resolved.load(std::memory_order_acquire)) return true;
+  std::lock_guard<std::mutex> lock(g_resolve_mutex);
+  if (g_resolved.load(std::memory_order_relaxed)) return true;
+
   void *cudart = dlopen("libcudart.so.12", RTLD_NOW | RTLD_NOLOAD);
-  if (!cudart) cudart = dlopen("libcudart.so.12", RTLD_NOW);
-  if (!cudart) return;
+  if (!cudart) return false;
   g_v2.real = reinterpret_cast<GetPropsFn>(dlsym(cudart, g_v2.name));
   g_legacy.real = reinterpret_cast<GetPropsFn>(dlsym(cudart, g_legacy.name));
 
   const char *env = std::getenv("CASSINI_CUDA_PROPS_CACHE");
-  if (env && std::strcmp(env, "0") == 0) return;
-
   auto runtime_version = reinterpret_cast<RuntimeVersionFn>(
       dlsym(cudart, "cudaRuntimeGetVersion"));
   int version = 0;
-  if (!runtime_version || runtime_version(&version) != kCudaSuccess) return;
-  g_cache = version >= 12000 && version < 13000;
+  g_cache = !(env && std::strcmp(env, "0") == 0) && runtime_version &&
+            runtime_version(&version) == kCudaSuccess && version >= 12000 &&
+            version < 13000;
+  // The handle stays open: libcudart.so.12 must outlive the pointers.
+  g_resolved.store(true, std::memory_order_release);
+  return true;
+}
+
+// No libcudart.so.12 in the process, so the caller was linked against another
+// CUDA major: pass the call, uncached, to that runtime if it is loaded.
+int ForwardToNewerRuntime(const Entry *e, void *prop, int device) {
+  static const char *const kNewer[] = {"libcudart.so.13", "libcudart.so.14",
+                                       "libcudart.so.15"};
+  for (const char *soname : kNewer) {
+    void *cudart = dlopen(soname, RTLD_NOW | RTLD_NOLOAD);
+    if (!cudart) continue;
+    auto fn = reinterpret_cast<GetPropsFn>(dlsym(cudart, e->name));
+    int ret = fn ? fn(prop, device) : kCudaErrorSymbolNotFound;
+    dlclose(cudart);
+    return ret;
+  }
+  return kCudaErrorSymbolNotFound;
 }
 
 int GetProps(Entry *e, void *prop, int device) {
-  std::call_once(g_init, Init);
+  if (!Resolve()) return ForwardToNewerRuntime(e, prop, device);
   if (!e->real) return kCudaErrorSymbolNotFound;
   if (!g_cache || !prop || device < 0 || device >= kMaxDevices) {
     return e->real(prop, device);
