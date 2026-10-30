@@ -9,7 +9,11 @@ ships. It is upstream sherpa-onnx **master at
 not released anything after v2.0.1, so the version string keeps the `2.0.1`
 base. Releases are annotated tags `v2.0.1-cassini-N`; tags are never moved or
 rewritten. A fix is a new commit and a new `N`. `v2.0.1-cassini-1`
-(`c810dfcf`) is patches 1-3 on the v2.0.1 release itself.
+(`c810dfcf`, branch `v2.0.1-cassini`, which stays there) is patches 1-3 on
+the v2.0.1 release itself. `v2.0.1-cassini-2` (branch
+`cassini/cuda-props-cache`) is patches 1-4 rebased onto the master commit
+above, so it is not a descendant of `-1`; the `2.0.1` in the tag and version
+string names the last upstream release, not the exact base.
 
 It replaces the `v1.13.7-cassini` branch (tags `v1.13.7-cassini-nemotron-v2`,
 `v1.13.7-cassini-parakeet-ultra-v1`), which stays as it was for the
@@ -180,6 +184,45 @@ upstream `sherpa-onnx-go-linux/v2 v2.0.1` module):
 Not validated here: CUDA, macOS, Windows, Linux arm64, the fp32 Ultra and fp32
 diarization models, and beam search. Those belong to the Go platform modules
 and the CUDA image.
+
+## Validation of v2.0.1-cassini-2
+
+Built with gocassini's `deployment/sherpa/build.sh` (CUDA and CPU, the pinned
+ONNX Runtime 1.28.2 archives) on Linux x86_64, GPU runs on an RTX 5060
+(driver 580, pip CUDA 12.9 runtime, cuDNN 9):
+
+- **Native tests:** `ctest` 34/34 pass on this base (30 on `-1`; upstream
+  added tests).
+- **Symbols:** the CUDA `libsherpa-onnx-c-api.so` exports 184 symbols, the
+  CPU one's 182 plus `cudaGetDeviceProperties` and
+  `cudaGetDeviceProperties_v2`; no symbol versions; NEEDED unchanged. The CPU
+  library exports the same list as `sherpa-onnx-go-linux/v2
+  v2.0.1-cassini.1`, and its `libonnxruntime.so` is byte-identical.
+- **GPU speed (patch 4):** fp32 Parakeet Ultra greedy, 20 VAD segments
+  alternating 11 s and 14 s: 1,276-1,283 ms of decode against 2,700-2,732 ms
+  for `-1` (2,722 ms with `CASSINI_CUDA_PROPS_CACHE=0`), system time 1.0 s
+  against 2.6 s; 39 mixed-length clips (835 s of audio): 3,277 ms against
+  4,547 ms. A 21.4 min meeting through Cassini's `build`: 28-29 s against 34.8 s
+  (system time 6.5-6.9 s against 13.5 s).
+  Tokens, timestamps and durations are identical in every arm, and the
+  meeting's `transcript.words.v1.json` and `captions.vtt` are byte-identical
+  to `-1`'s.
+- **CPU:** Parakeet Ultra int8, 6 threads, same meeting: byte-identical
+  transcript and captions to `sherpa-onnx-go-linux/v2 v2.0.1-cassini.1`.
+- **Probe:** sherpa-onnx-go-linux's `scripts/cassini-probe.sh` on the CPU
+  libraries passes (version string; Parakeet v3 int8 and plain-URL Ultra int8
+  27 tokens at gain 1 and 0.001; Sortformer 9 turns, 4 speakers), output
+  identical to `-1`'s probe.
+- **Cache unit checks** against a stand-in `libcudart.so.12`: failures are
+  not cached; device indexes outside 0-63 and a 13.x runtime pass through;
+  `CASSINI_CUDA_PROPS_CACHE=0` passes through; the reserved tail is zeroed;
+  8 threads x 100,000 calls make no real call once cached; a call made before
+  `libcudart.so.12` is loaded returns 302 and the next one after it loads
+  succeeds; with only a stand-in `libcudart.so.13` loaded, calls reach it
+  uncached.
+
+Not validated here: the CUDA container image, macOS, Windows and Linux arm64
+(their Go modules' workflows build and probe them), and beam search.
 
 ## Downstream
 
